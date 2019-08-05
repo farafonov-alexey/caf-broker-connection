@@ -14,6 +14,7 @@
 #ifdef WIN32
 //# define _WIN32_WINNT 0x0600
 # include <winsock2.h>
+
 #else
 # include <arpa/inet.h> // htonl
 #endif
@@ -43,25 +44,25 @@ namespace {
     using kickoff_atom = atom_constant<atom("kickoff")>;
 
 // utility function to print an exit message with custom name
-    void print_on_exit(const actor& hdl, const std::string& name) {
-        hdl->attach_functor([=](const error& reason) {
+    void print_on_exit(const actor &hdl, const std::string &name) {
+        hdl->attach_functor([=](const error &reason) {
             cout << name << " exited: " << to_string(reason) << endl;
         });
     }
 
-    behavior ping(event_based_actor* self, size_t num_pings) {
+    behavior ping(event_based_actor *self, size_t num_pings) {
         auto count = std::make_shared<size_t>(0);
         return {
-                [=](kickoff_atom, const actor& pong) {
+                [=](kickoff_atom, const actor &pong) {
                     self->send(pong, ping_atom::value, int32_t(1));
-                    self->become (
+                    self->become(
                             [=](pong_atom, int32_t value) -> result<ping_atom, int32_t> {
 //                                if (++*count >= num_pings) {
 //                                    self->quit();
 //                                } else {
 //                                    self->delayed_send(pong, std::chrono::milliseconds(500), ping_atom::value, value + 1);
 //                                }
-                                    return {ping_atom::value, value + 1};
+                                return {ping_atom::value, value + 1};
                             }
                     );
                 }
@@ -77,44 +78,44 @@ namespace {
     }
 
 // utility function for sending an integer type
-    template <class T>
-    void write_int(broker* self, connection_handle hdl, T value) {
+    template<class T>
+    void write_int(broker *self, connection_handle hdl, T value) {
         using unsigned_type = typename std::make_unsigned<T>::type;
         auto cpy = static_cast<T>(htonl(static_cast<unsigned_type>(value)));
         self->write(hdl, sizeof(T), &cpy);
         self->flush(hdl);
     }
 
-    void write_int(broker* self, connection_handle hdl, uint64_t value) {
+    void write_int(broker *self, connection_handle hdl, uint64_t value) {
         // write two uint32 values instead (htonl does not work for 64bit integers)
         write_int(self, hdl, static_cast<uint32_t>(value));
         write_int(self, hdl, static_cast<uint32_t>(value >> sizeof(uint32_t)));
     }
 
 // utility function for reading an ingeger from incoming data
-    template <class T>
-    void read_int(const void* data, T& storage) {
+    template<class T>
+    void read_int(const void *data, T &storage) {
         using unsigned_type = typename std::make_unsigned<T>::type;
         memcpy(&storage, data, sizeof(T));
         storage = static_cast<T>(ntohl(static_cast<unsigned_type>(storage)));
     }
 
-    void read_int(const void* data, uint64_t& storage) {
+    void read_int(const void *data, uint64_t &storage) {
         uint32_t first;
         uint32_t second;
         read_int(data, first);
-        read_int(reinterpret_cast<const char*>(data) + sizeof(uint32_t), second);
+        read_int(reinterpret_cast<const char *>(data) + sizeof(uint32_t), second);
         storage = first | (static_cast<uint64_t>(second) << sizeof(uint32_t));
     }
 
 // implemenation of our broker
-    behavior broker_impl(broker* self, connection_handle hdl, const actor& buddy) {
+    behavior broker_impl(broker *self, connection_handle hdl, const actor &buddy) {
         // we assume io_fsm manages a broker with exactly one connection,
         // i.e., the connection ponted to by `hdl`
 //        assert(self->num_connections() == 1);
         // monitor buddy to quit broker if buddy is done
         self->monitor(buddy);
-        self->set_down_handler([=](down_msg& dm) {
+        self->set_down_handler([=](down_msg &dm) {
             if (dm.source == buddy) {
                 aout(self) << "our buddy is down" << endl;
                 // quit for same reason
@@ -127,14 +128,14 @@ namespace {
                                                           sizeof(int32_t)));
         // our message handlers
         return {
-                [=](const connection_closed_msg& msg) {
+                [=](const connection_closed_msg &msg) {
                     // brokers can multiplex any number of connections, however
                     // this example assumes io_fsm to manage a broker with
                     // exactly one connection
                     if (msg.handle == hdl) {
                         aout(self) << "connection closed" << endl;
                         // force buddy to quit
-                        self->send_exit(buddy, exit_reason::remote_link_unreachable);
+//                        self->send_exit(buddy, exit_reason::remote_link_unreachable);
                         self->quit(exit_reason::remote_link_unreachable);
                     }
                 },
@@ -145,7 +146,7 @@ namespace {
                     write_int(self, hdl, static_cast<uint64_t>(av));
                     write_int(self, hdl, i);
                 },
-                [=](const new_data_msg& msg) {
+                [=](const new_data_msg &msg) {
                     // read the atom value as uint64_t from buffer
                     uint64_t atm_val;
                     read_int(msg.buf.data(), atm_val);
@@ -164,21 +165,27 @@ namespace {
         };
     }
 
-    behavior server(broker* self) {
+    struct State {
+        int conn_cnt = 0;
+    };
+
+    behavior server(stateful_actor<State, broker> *self, const actor& pong_actor) {
         aout(self) << "server is running" << endl;
         return {
-                [=](const new_connection_msg& msg) {
-                    aout(self) << "server accepted new connection num =" << self->num_connections()<< endl;
-                    // by forking into a new broker, we are no longer
-                    // responsible for the connection
-                    auto broker = static_cast<actor>(self);
-                    auto buddy = broker.home_system().spawn(pong);
-                    print_on_exit(buddy, "pong");
-                    auto impl = self->fork(broker_impl, msg.handle, buddy);
-                    print_on_exit(impl, "broker_impl");
-//                    aout(self) << "quit server (only accept 1 connection)" << endl;
-//                    self->quit();
-                }
+                [=](const new_connection_msg &msg) {
+                    aout(self) << "server accepted new connection num =" << self->state.conn_cnt << endl;
+                    if(self->state.conn_cnt == 0) {
+                        auto io_impl = self->fork(broker_impl, msg.handle, pong_actor);
+                        print_on_exit(io_impl, "broker_impl");
+                        self->state.conn_cnt++;
+
+                        io_impl->attach_functor([=](const error &reason) {
+                            self->state.conn_cnt--;
+                        });
+                    } else {
+                        self->close(msg.handle);
+                    }
+                },
         };
     }
 
@@ -196,9 +203,12 @@ namespace {
         }
     };
 
-    void run_server(actor_system& system, const config& cfg) {
+    void run_server(actor_system &system, const config &cfg) {
         cout << "run in server mode" << endl;
-        auto server_actor = system.middleman().spawn_server(server, cfg.port);
+        auto pong_actor = system.spawn(pong);
+        print_on_exit(pong_actor, "pong");
+        auto server_actor = system.middleman().spawn_server(server, cfg.port, pong_actor);
+
         if (!server_actor) {
             std::cerr << "failed to spawn server: "
                       << system.render(server_actor.error()) << endl;
@@ -210,9 +220,10 @@ namespace {
         std::getline(std::cin, dummy);
         cout << "... cya" << endl;
         anon_send_exit(*server_actor, exit_reason::user_shutdown);
+        anon_send_exit(pong_actor, exit_reason::user_shutdown);
     }
 
-    void run_client(actor_system& system, const config& cfg) {
+    void run_client(actor_system &system, const config &cfg) {
         auto ping_actor = system.spawn(ping, size_t{10});
         auto io_actor = system.middleman().spawn_client(broker_impl, cfg.host,
                                                         cfg.port, ping_actor);
@@ -228,10 +239,11 @@ namespace {
         std::string dummy;
         std::getline(std::cin, dummy);
         cout << "... cya" << endl;
+        anon_send_exit(*io_actor, exit_reason::user_shutdown);
         anon_send_exit(ping_actor, exit_reason::user_shutdown);
     }
 
-    void caf_main(actor_system& system, const config& cfg) {
+    void caf_main(actor_system &system, const config &cfg) {
         auto f = cfg.server_mode ? run_server : run_client;
         f(system, cfg);
     }
