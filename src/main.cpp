@@ -56,13 +56,14 @@ namespace {
                 [=](kickoff_atom, const actor &pong) {
                     self->send(pong, ping_atom::value, int32_t(1));
                     self->become(
-                            [=](pong_atom, int32_t value) -> result<ping_atom, int32_t> {
-//                                if (++*count >= num_pings) {
+                            [=](pong_atom, int32_t value) {
+                                if (++*count >= num_pings) {
 //                                    self->quit();
-//                                } else {
-//                                    self->delayed_send(pong, std::chrono::milliseconds(500), ping_atom::value, value + 1);
-//                                }
-                                return {ping_atom::value, value + 1};
+                                } else {
+//                                    return make_message(ping_atom::value, value + 1);
+                                    self->delayed_send(pong, std::chrono::milliseconds(100), ping_atom::value,
+                                                       value + 1);
+                                }
                             }
                     );
                 }
@@ -110,23 +111,16 @@ namespace {
 
 // implemenation of our broker
     behavior broker_impl(broker *self, connection_handle hdl, const actor &buddy) {
-        // we assume io_fsm manages a broker with exactly one connection,
-        // i.e., the connection ponted to by `hdl`
-//        assert(self->num_connections() == 1);
-        // monitor buddy to quit broker if buddy is done
-        self->monitor(buddy);
-        self->set_down_handler([=](down_msg &dm) {
-            if (dm.source == buddy) {
-                aout(self) << "our buddy is down" << endl;
-                // quit for same reason
-                self->quit(dm.reason);
-            }
-        });
-        // setup: we are exchanging only messages consisting of an atom
-        // (as uint64_t) and an integer value (int32_t)
+//        self->monitor(buddy);
+//        self->set_down_handler([=](down_msg &dm) {
+//            if (dm.source == buddy) {
+//                aout(self) << "our buddy is down" << endl;
+//                // quit for same reason
+//                self->quit(dm.reason);
+//            }
+//        });
         self->configure_read(hdl, receive_policy::exactly(sizeof(uint64_t) +
                                                           sizeof(int32_t)));
-        // our message handlers
         return {
                 [=](const connection_closed_msg &msg) {
                     // brokers can multiplex any number of connections, however
@@ -134,9 +128,8 @@ namespace {
                     // exactly one connection
                     if (msg.handle == hdl) {
                         aout(self) << "connection closed" << endl;
-                        // force buddy to quit
-//                        self->send_exit(buddy, exit_reason::remote_link_unreachable);
                         self->quit(exit_reason::remote_link_unreachable);
+//                        self->send_exit(buddy, exit_reason::remote_link_unreachable);
                     }
                 },
                 [=](atom_value av, int32_t i) {
@@ -152,14 +145,9 @@ namespace {
                     read_int(msg.buf.data(), atm_val);
                     // cast to original type
                     auto atm = static_cast<atom_value>(atm_val);
-                    // read integer value from buffer, jumping to the correct
-                    // position via offset_data(...)
                     int32_t ival;
                     read_int(msg.buf.data() + sizeof(uint64_t), ival);
-                    // show some output
-//                    aout(self) << "received {" << to_string(atm) << ", " << ival << "}"
-//                               << endl;
-                    // send composed message to our buddy
+                    aout(self) << "received {" << to_string(atm) << ", " << ival << "}" << endl;
                     self->send(buddy, atm, ival);
                 }
         };
@@ -169,19 +157,33 @@ namespace {
         int conn_cnt = 0;
     };
 
-    behavior server(stateful_actor<State, broker> *self, const actor& pong_actor) {
+    behavior server(stateful_actor<State, broker> *self, const actor &pong_actor) {
         aout(self) << "server is running" << endl;
         return {
                 [=](const new_connection_msg &msg) {
                     aout(self) << "server accepted new connection num =" << self->state.conn_cnt << endl;
-                    if(self->state.conn_cnt == 0) {
+                    if (self->state.conn_cnt == 0) {
                         auto io_impl = self->fork(broker_impl, msg.handle, pong_actor);
                         print_on_exit(io_impl, "broker_impl");
                         self->state.conn_cnt++;
 
-                        io_impl->attach_functor([=](const error &reason) {
-                            self->state.conn_cnt--;
+//                        io_impl->attach_functor([=](const error &reason) {
+//                            self->state.conn_cnt--;
+//                        });
+                        self->monitor(io_impl);
+                        self->set_down_handler([=](down_msg &dm) {
+                            if (dm.source == io_impl) {
+                                aout(self) << "our io_impl is down " << dm << endl;
+                                self->state.conn_cnt--;
+                            }
                         });
+//                        self->set_error_handler([=](error &err) {
+//                            aout(self) << "our io_impl send err" << err << endl;
+//                        });
+//                        self->set_exit_handler([=](exit_msg &em) {
+//                            aout(self) << "our io_impl send err" << em << endl;
+//                        });
+
                     } else {
                         self->close(msg.handle);
                     }
